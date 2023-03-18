@@ -54,32 +54,36 @@ end
 
 local lua_async_tasks = {}
 
-local function execute_lua_async(callback, ...)
+local function execute_lua_async(task, callback, ...)
 	local err, traceback
 	xpcall(function(callback_inner, ...)
 		callback_inner(...)
 	end, function(err_inner)
 		err = err_inner
 		traceback = debug.traceback(nil, 2)
+		task.error = err
 	end, callback, ...)
 	lua_async_tasks[coroutine.running()] = nil
 
 	if traceback then
-		print(string.format("%s\nstack traceback:\n%s", tostring(err), "\t" .. traceback:gsub("\n", "\n\t")))
+		error(string.format("%s\nstack traceback:\n%s", tostring(err), "\t" .. traceback:gsub("\n", "\n\t")))
 	end
 end
 
 local function spawn_lua(callback, ...)
+	local task = {}
+
 	local thread
 	if type(callback) == "thread" then
 		thread = callback
-		lua_async_tasks[thread] = true
-		coroutine.resume(thread, ...)
+		lua_async_tasks[task] = true
+		coroutine.resume(thread, task, ...)
 	else
 		thread = coroutine.create(execute_lua_async)
-		lua_async_tasks[thread] = true
-		coroutine.resume(thread, callback, ...)
+		lua_async_tasks[task] = true
+		coroutine.resume(thread, task, callback, ...)
 	end
+	task.thread = thread
 
 	return thread
 end
@@ -113,6 +117,8 @@ local function debug_list_lua_tasks()
 end
 
 local function start()
+	local failure = {}
+
 	while true do
 		for task, _ in rust_async_tasks do
 			coroutine.resume(task.task_thread)
@@ -120,11 +126,17 @@ local function start()
 		coroutine.yield()
 
 		for _, task_args in lua_async_tasks_deferred do
-			coroutine.resume(unpack(task_args, 1, task_args.n))
+			local success, message = coroutine.resume(unpack(task_args, 1, task_args.n))
+			if not success then
+				table.insert(failure, tostring(message))
+			end
 		end
 
 		for task, _ in lua_async_tasks do
-			if coroutine.status(task) == "dead" then
+			if coroutine.status(task.thread) == "dead" then
+				if task.error then
+					table.insert(failure, tostring(task.error))
+				end
 				lua_async_tasks[task] = nil
 			end
 		end
@@ -132,6 +144,10 @@ local function start()
 		if next(lua_async_tasks) == nil then
 			break
 		end
+	end
+
+	if next(failure) ~= nil then
+		error(string.format("Lua tasks have failed.\n%s", table.concat(failure, "\n")))
 	end
 end
 
@@ -159,7 +175,6 @@ end
 function task_lib.delay(duration, callback, ...)
 	return spawn_lua(execute_delay, duration, callback, ...)
 end
-
 
 return {
 	spawn_rust = spawn_rust,

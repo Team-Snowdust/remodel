@@ -78,6 +78,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     if let Err(err) = run(options).await {
         log::error!("{:?}", err);
+        process::exit(1);
     }
 
     Ok(())
